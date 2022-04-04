@@ -1,0 +1,226 @@
+variables:
+  MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN -Dorg.slf4j.simpleLogger.showDateTime=true -Djava.awt.headless=true"
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version -DinstallAtEnd=true -DdeployAtEnd=true"
+  DOCKER_TLS_CERTDIR: ""
+
+stages:
+  - build
+  - package
+  - deploy-beta-migrate
+  - deploy-beta
+  - deploy-staging-prepare
+  - deploy-staging-migrate
+  - deploy-staging
+  - deploy-production-prepare
+  - deploy-production-migrate
+  - deploy-production
+
+cache:
+  paths:
+    - .m2/repository
+
+build:
+  stage: build
+  image: maven:3.6.3-jdk-11
+  script:
+    - mvn $MAVEN_CLI_OPTS package -DskipTests
+    - ls -l
+    - cd target/quarkus-app/
+    - ls -R
+  artifacts:
+    paths:
+      - target/quarkus-app/*
+  only:
+    - master
+    - /^.*-stable$/
+    - /^.*-final$/
+  except:
+    - tags
+  
+
+package:
+  stage: package
+  cache: {}
+  image: docker:18-git
+  services:
+    - docker:dind
+  script:
+    - apk update && apk add --no-cache openssh ca-certificates libxml2-utils bash && rm -rf /var/cache/apk/*
+    - export RELEASE_VERSION=$(xmllint --xpath '/*[local-name()="project"]/*[local-name()="version"]/text()' pom.xml)
+    - echo 'PUBLICANDO IMAGEM DOCKER UNSTABLE DO PROJETO ' $CI_PROJECT_NAME  $RELEASE_VERSION
+    - echo $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-unstable
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker pull $CI_REGISTRY_IMAGE:latest || true
+    - docker build --cache-from $CI_REGISTRY_IMAGE:latest -f src/main/docker/Dockerfile.fast-jar -t $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-unstable .
+    - docker push $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-unstable
+    - >
+      if [ "$CI_COMMIT_REF_NAME" == "master" ]; then
+        docker tag $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-unstable $CI_REGISTRY_IMAGE:latest
+        docker push $CI_REGISTRY_IMAGE:latest
+      fi
+  only:
+    - master
+    - /^.*-stable$/
+    - /^.*-final$/
+  except:
+    - tags
+
+    
+deploy-beta-migrate:
+  stage: deploy-beta-migrate
+  image: maven:3.6.3-jdk-11
+  script:
+    - echo "Executando Migrations"
+    - mvn $MAVEN_CLI_OPTS flyway:repair -Dflyway.url=$MIGRATION_DEV_URL -Dflyway.user=$MIGRATION_DEV_USER -Dflyway.password=$MIGRATION_DEV_PASSWORD
+    - mvn $MAVEN_CLI_OPTS flyway:migrate -Dflyway.url=$MIGRATION_DEV_URL -Dflyway.user=$MIGRATION_DEV_USER -Dflyway.password=$MIGRATION_DEV_PASSWORD
+  only:
+    - master
+  except:
+   - tags
+
+
+deploy-beta:
+  stage: deploy-beta
+  cache: {}
+  image: openshift/origin-cli
+  before_script:
+    - oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_PIPELINE_TOKEN_DEV" --insecure-skip-tls-verify  
+    - oc project $OPENSHIFT_PROJECT_DEV
+  script:
+    - echo "REGISTRY URL" $CI_REGISTRY_IMAGE
+    - oc import-image $CI_PROJECT_NAME:latest --from=$CI_REGISTRY_IMAGE:latest --insecure=true --confirm
+  only:
+    - master
+  except:
+    - tags
+
+deploy-staging-prepare:
+  stage: deploy-staging-prepare
+  cache: {}
+  image: docker:18-git
+  services:
+    - docker:dind
+  before_script:
+    - apk update && apk add --no-cache openssh ca-certificates libxml2-utils bash && rm -rf /var/cache/apk/*
+  script:
+    - export RELEASE_VERSION=$(xmllint --xpath '/*[local-name()="project"]/*[local-name()="version"]/text()' pom.xml)
+    - echo 'Atualizando Aplicação no ambiente de homologação para Versão ' $RELEASE_VERSION
+    - export NEW_REPO_URL=$(echo $CI_REPOSITORY_URL | sed 's/@[^/]*/@git.apps.rio.gov.br/' | sed 's/\(http[s]*\):\/\/[^@]*/\1:\/\/oauth2:'$PIPELINE_ACCESS_TOKEN'/')
+# criar a tag da  versão no git. Como o projeto não tem informação de versão, o hash do commit é usado
+    - git config --global user.name "pipeline"
+    - git config --global user.email "pipeline@git.apps.rio.gov.br"
+    - git tag -a $RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-stable -m "Pipeline criou tag para versão $RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-stable"
+    - git remote set-url --push origin $NEW_REPO_URL
+    - git push origin $RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-stable
+# Faz o download (pull) da imagem de desenvolvimento, coloca uma tag que muda o nome no final de unstable para stable, gerando assim uma imagem com tag stable
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker pull $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-unstable 
+    - docker tag $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-unstable $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-stable
+    - docker push $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-stable
+  only:
+    - master
+    - /^.*-stable$/
+    - /^.*-final$/
+  except:
+    - tags
+  when: manual
+  allow_failure: false
+
+deploy-staging-migrate:
+  stage: deploy-staging-migrate
+  image: maven:3.6.3-jdk-11
+  script:
+    - echo "Executando Migrations"
+    - mvn $MAVEN_CLI_OPTS flyway:repair -Dflyway.url=$MIGRATION_HOM_URL -Dflyway.user=$MIGRATION_HOM_USER -Dflyway.password=$MIGRATION_HOM_PASSWORD
+    - mvn $MAVEN_CLI_OPTS flyway:migrate -Dflyway.url=$MIGRATION_HOM_URL -Dflyway.user=$MIGRATION_HOM_USER -Dflyway.password=$MIGRATION_HOM_PASSWORD
+  only:
+    - master
+    - /^.*-stable$/
+    - /^.*-final$/
+  except:
+    - tags
+  dependencies:
+    - deploy-staging-prepare
+
+deploy-staging-openshift:
+  stage: deploy-staging
+  cache: {}
+  image: openshift/origin-cli
+  before_script:
+    - oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_PIPELINE_TOKEN_HOM" --insecure-skip-tls-verify  
+    - oc project $OPENSHIFT_PROJECT_HOM
+  script:
+    - export RELEASE_VERSION=$(xmllint --xpath '/*[local-name()="project"]/*[local-name()="version"]/text()' pom.xml)
+    - oc import-image $CI_PROJECT_NAME:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-stable --from=$CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-stable --insecure=true --confirm
+    - oc set triggers dc/$CI_PROJECT_NAME --remove-all
+    - oc set triggers dc/$CI_PROJECT_NAME --from-image $CI_PROJECT_NAME:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-stable --containers=$CI_PROJECT_NAME
+    - oc rollout latest dc/$CI_PROJECT_NAME
+  only:
+    - master
+    - /^.*-stable$/
+    - /^.*-final$/
+
+deploy-production-prepare:
+  stage: deploy-production-prepare
+  cache: {}
+  image: docker:18-git
+  services:
+    - docker:dind
+  before_script:
+    - apk update && apk add --no-cache openssh ca-certificates libxml2-utils bash && rm -rf /var/cache/apk/*
+  script:
+    - export RELEASE_VERSION=$(xmllint --xpath '/*[local-name()="project"]/*[local-name()="version"]/text()' pom.xml)
+    - echo 'Atualizando Aplicação no ambiente de produção para Versão ' $RELEASE_VERSION
+    - export NEW_REPO_URL=$(echo $CI_REPOSITORY_URL | sed 's/@[^/]*/@git.apps.rio.gov.br/' | sed 's/\(http[s]*\):\/\/[^@]*/\1:\/\/oauth2:'$PIPELINE_ACCESS_TOKEN'/')
+    - git config --global user.name "pipeline"
+    - git config --global user.email "pipeline@git.apps.rio.gov.br"
+    - git tag -a $RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-final -m "Pipeline criou tag para versão $RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-final"
+    - git remote set-url --push origin $NEW_REPO_URL
+    - git push origin $RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-final
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker pull $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-stable 
+    - docker tag $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-stable $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-final
+    - docker push $CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-final
+  only:
+    - master
+    - /^.*-final$/
+  except:
+    - tags
+  when: manual
+  allow_failure: false
+
+deploy-production-migrate:
+  stage: deploy-production-migrate
+  image: maven:3.6.3-jdk-11
+  script:
+    - echo "Executando Migrations"
+    - mvn $MAVEN_CLI_OPTS flyway:repair -Dflyway.url=$MIGRATION_PROD_URL -Dflyway.user=$MIGRATION_PROD_USER -Dflyway.password=$MIGRATION_PROD_PASSWORD
+    - mvn $MAVEN_CLI_OPTS flyway:migrate -Dflyway.url=$MIGRATION_PROD_URL -Dflyway.user=$MIGRATION_PROD_USER -Dflyway.password=$MIGRATION_PROD_PASSWORD
+  only:
+    - master
+    - /^.*-final$/
+  except:
+    - tags
+  dependencies:
+    - deploy-production-prepare
+
+deploy-production-openshift:
+  stage: deploy-production
+  cache: {}
+  image: openshift/origin-cli
+  before_script:
+    - oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_PIPELINE_TOKEN_PROD" --insecure-skip-tls-verify  
+    - oc project $OPENSHIFT_PROJECT_PROD
+  script:
+    - export RELEASE_VERSION=$(xmllint --xpath '/*[local-name()="project"]/*[local-name()="version"]/text()' pom.xml)
+    - oc import-image $CI_PROJECT_NAME:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-final --from=$CI_REGISTRY_IMAGE:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-final --insecure=true --confirm
+    - oc set triggers dc/$CI_PROJECT_NAME --remove-all
+    - oc set triggers dc/$CI_PROJECT_NAME --from-image $CI_PROJECT_NAME:$RELEASE_VERSION-$CI_COMMIT_SHORT_SHA-final --containers=$CI_PROJECT_NAME
+    - oc rollout latest dc/$CI_PROJECT_NAME
+  only:
+    - master
+    - /^.*-final$/
+  except:
+    - tags
+  dependencies:
+    - deploy-production-prepare
