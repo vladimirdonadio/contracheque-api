@@ -19,6 +19,6 @@ import org.eclipse.microprofile.openapi.annotations.info.License;
 	            name = "License Apache 2.0",
 	            url = "https://www.apache.org/licenses/LICENSE-2.0.html"))
 	)
-public class ContrachequeSwagger extends Application {
+	public class ContrachequeSwagger extends Application {
 
 }
