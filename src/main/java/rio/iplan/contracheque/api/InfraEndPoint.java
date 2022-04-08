@@ -38,7 +38,7 @@ public class InfraEndPoint {
 	public Response heartbeatDatabase() {
 		
 		entityManager
-			.createQuery("select count(*) from FuncionarioTaxiRio", Long.class)
+			.createQuery("select count(*) from ContraCheque", Long.class)
 			.getSingleResult();
 		
 		return Response.ok("Beating Database").build();
