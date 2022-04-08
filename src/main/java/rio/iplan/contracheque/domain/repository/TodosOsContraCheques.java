@@ -7,7 +7,7 @@ import javax.inject.Inject;
 import javax.inject.Named;
 import javax.persistence.EntityManager;
 import javax.persistence.NoResultException;
-//import javax.persistence.Query;
+import javax.persistence.Query;
 
 import rio.iplan.contracheque.api.ContrachequeapiException;
 import rio.iplan.contracheque.domain.ContraCheque;
@@ -202,6 +202,7 @@ public class TodosOsContraCheques {
 		return query.getResultList();
 
 	}
+	*/
 
 	public boolean isFuncionario(Long cpf) {
 		String sql = "select cpf "
@@ -215,6 +216,5 @@ public class TodosOsContraCheques {
 		return (query.getResultList().size()>0);
 		
 	}
-	*/
 
 }
