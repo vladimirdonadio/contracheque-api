@@ -15,7 +15,7 @@ mvn clean package quarkus:dev
 
 mvn clean package
 
-cd ../contracheque-envirionment/; docker-compose down; docker-compose up --build -d contracheque-api; cd ../contracheque-api
+cd ../contracheque-environment/; docker-compose down; docker-compose up --build -d contracheque-api; cd ../contracheque-api
 
 mvn quarkus:remote-dev -Dquarkus.live-reload.url=http://localhost:8080 -Dquarkus.live-reload.password=123 -Ddebug=false
 
